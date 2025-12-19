@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-// ✅ Firebase (ojo: renombramos db -> firestore para evitar choque con tu estado db)
+import { Moon, Sun } from "lucide-react";
+
+// Firebase
 import { auth, db as firestore } from "./firebase";
 import {
   GoogleAuthProvider,
@@ -8,8 +10,23 @@ import {
   signOut,
   onAuthStateChanged,
 } from "firebase/auth";
-import { doc, setDoc, onSnapshot } from "firebase/firestore";
 
+import {
+  collection,
+  doc,
+  setDoc,
+  addDoc,
+  deleteDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  limit,
+  serverTimestamp,
+  getDocs,
+  writeBatch,
+} from "firebase/firestore";
+
+// UI (shadcn)
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,55 +39,51 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+
 import {
   ChevronLeft,
   Volume2,
   Eye,
   EyeOff,
   Plus,
-  Download,
-  Upload,
   Trash2,
   CalendarDays,
   LogOut,
+  ChevronDown,
+  ChevronUp,
+  Download,
+  Upload,
 } from "lucide-react";
 
 /**
- * English Study Planner (A1–C1)
- * - Niveles (A1, A2, B1, B2, C1)
- * - Cada nivel tiene días
- * - Cada día tiene: Palabras y Frases
- * - Guardado en Firestore por usuario (Google Login)
- * - Botón pronunciación (Web Speech API)
- * - Mostrar/ocultar significado en español
- * - Importar/Exportar JSON
+ * NUEVA ESTRUCTURA (Firestore)
+ * users/{uid}/levels/{level}/days/{dayId}
+ * users/{uid}/levels/{level}/days/{dayId}/words/{wordId}
+ * users/{uid}/levels/{level}/days/{dayId}/words/{wordId}/phrases/{phraseId}
+ *
+ * Reglas:
+ * - Máx 40 palabras por día
+ * - Máx 10 frases por palabra
  */
 
+const THEME_KEY = "english_study_theme";
+
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === "dark") root.classList.add("dark");
+  else root.classList.remove("dark");
+}
+
+function getInitialTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved === "dark" || saved === "light") return saved;
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  return prefersDark ? "dark" : "light";
+}
+
 const LEVELS = ["A1", "A2", "B1", "B2", "C1"];
-
-function uid() {
-  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-}
-
-function defaultDB() {
-  const db = {};
-  for (const lvl of LEVELS) {
-    db[lvl] = { days: { "1": { words: [], phrases: [] } } };
-  }
-  return db;
-}
-
-function safeParse(json, fallback) {
-  try {
-    const v = JSON.parse(json);
-    return v ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 function speakEnglish(text) {
   if (!text?.trim()) return;
@@ -79,7 +92,6 @@ function speakEnglish(text) {
     alert("Tu navegador no soporta Speech Synthesis (TTS). Prueba con Chrome/Edge.");
     return;
   }
-
   synth.cancel();
   const utter = new SpeechSynthesisUtterance(text);
 
@@ -95,27 +107,64 @@ function speakEnglish(text) {
   synth.speak(utter);
 }
 
+// Firestore path helpers
+const levelDaysCol = (uid, level) =>
+  collection(firestore, "users", uid, "levels", level, "days");
+
+const dayDocRef = (uid, level, dayId) =>
+  doc(firestore, "users", uid, "levels", level, "days", dayId);
+
+const wordsCol = (uid, level, dayId) =>
+  collection(firestore, "users", uid, "levels", level, "days", dayId, "words");
+
+const wordDocRef = (uid, level, dayId, wordId) =>
+  doc(firestore, "users", uid, "levels", level, "days", dayId, "words", wordId);
+
+const phrasesCol = (uid, level, dayId, wordId) =>
+  collection(
+    firestore,
+    "users",
+    uid,
+    "levels",
+    level,
+    "days",
+    dayId,
+    "words",
+    wordId,
+    "phrases"
+  );
+
+const phraseDocRef = (uid, level, dayId, wordId, phraseId) =>
+  doc(
+    firestore,
+    "users",
+    uid,
+    "levels",
+    level,
+    "days",
+    dayId,
+    "words",
+    wordId,
+    "phrases",
+    phraseId
+  );
+
 function TopBar({ title, left, right }) {
+  // Barra robusta: título arriba, acciones abajo con scroll en móvil
   return (
     <div className="sticky top-0 z-20 bg-background/80 backdrop-blur border-b">
       <div className="mx-auto max-w-5xl px-4 py-3">
-        {/* Fila 1: izquierda + título */}
         <div className="flex items-center gap-2">
           <div className="shrink-0">{left}</div>
 
           <h1 className="min-w-0 flex-1 text-base sm:text-xl font-semibold tracking-tight leading-snug truncate">
             {title}
           </h1>
-
-          {/* En desktop, si quieres, también podrías poner acciones aquí,
-              pero nosotros las dejamos en la fila 2 */}
         </div>
 
-        {/* Fila 2: acciones (en móvil con scroll horizontal) */}
         {right ? (
           <div className="mt-2">
             <div className="flex gap-2 overflow-x-auto pb-1 sm:overflow-visible sm:pb-0">
-              {/* esto evita que los botones se hagan chiquitos */}
               <div className="flex gap-2 min-w-max">{right}</div>
             </div>
           </div>
@@ -139,135 +188,12 @@ function EmptyState({ title, subtitle, action }) {
   );
 }
 
-function ItemCard({ item, onToggle, onSpeak, onDelete }) {
+function FxButton({ className = "", ...props }) {
   return (
-    <Card className="rounded-2xl">
-      <CardContent className="p-4 sm:p-5">
-        <div className="flex items-start gap-3">
-          <div className="flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="text-base sm:text-lg font-semibold leading-snug">
-                {item.en}
-              </div>
-
-              <Button
-                variant="ghost"
-                size="icon"
-                className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]"
-                onClick={onSpeak}
-                title="Escuchar pronunciación"
-              >
-                <Volume2 className="h-4 w-4" />
-              </Button>
-
-              <Button
-                variant="ghost"
-                size="icon"
-                className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]"
-                onClick={onToggle}
-                title={item.showEs ? "Ocultar significado" : "Ver significado"}
-              >
-                {item.showEs ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </Button>
-            </div>
-
-            {item.showEs ? (
-              <div className="mt-2 text-sm text-muted-foreground">{item.es}</div>
-            ) : (
-              <div className="mt-2 text-sm text-muted-foreground italic">
-                (toca el ojo para ver el significado)
-              </div>
-            )}
-          </div>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]"
-            onClick={onDelete}
-            title="Eliminar"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function AddItemDialog({ type, onAdd }) {
-  const [en, setEn] = useState("");
-  const [es, setEs] = useState("");
-
-  const reset = () => {
-    setEn("");
-    setEs("");
-  };
-
-  const submit = () => {
-    if (!en.trim() || !es.trim()) return;
-    onAdd({
-      id: uid(),
-      en: en.trim(),
-      es: es.trim(),
-      showEs: false,
-      createdAt: new Date().toISOString(),
-    });
-    reset();
-  };
-
-  return (
-    <Dialog>
-      <DialogTrigger asChild>
-        <Button className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]">
-          <Plus className="h-4 w-4 mr-2" /> Agregar {type === "words" ? "palabra" : "frase"}
-        </Button>
-      </DialogTrigger>
-
-      <DialogContent className="rounded-2xl max-h-[85vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Agregar {type === "words" ? "palabra" : "frase"}</DialogTitle>
-        </DialogHeader>
-
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <div className="text-sm font-medium">Inglés</div>
-            {type === "words" ? (
-              <Input
-                value={en}
-                onChange={(e) => setEn(e.target.value)}
-                placeholder="Ej: curious"
-              />
-            ) : (
-              <Textarea
-                value={en}
-                onChange={(e) => setEn(e.target.value)}
-                placeholder="Escribe la frase en inglés"
-              />
-            )}
-          </div>
-
-          <div className="space-y-1">
-            <div className="text-sm font-medium">Español (significado)</div>
-            <Textarea
-              value={es}
-              onChange={(e) => setEs(e.target.value)}
-              placeholder="Escribe el significado en español"
-            />
-          </div>
-        </div>
-
-        <DialogFooter>
-          <Button
-            onClick={submit}
-            disabled={!en.trim() || !es.trim()}
-            className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]"
-          >
-            Guardar
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Button
+      {...props}
+      className={`transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98] ${className}`}
+    />
   );
 }
 
@@ -286,9 +212,9 @@ function AddDayDialog({ existingDays, onAddDay }) {
   return (
     <Dialog>
       <DialogTrigger asChild>
-        <Button variant="secondary" className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]">
+        <FxButton variant="secondary" className="rounded-full shrink-0">
           <Plus className="h-4 w-4 mr-2" /> Agregar día
-        </Button>
+        </FxButton>
       </DialogTrigger>
 
       <DialogContent className="rounded-2xl max-h-[85vh] overflow-y-auto">
@@ -298,7 +224,7 @@ function AddDayDialog({ existingDays, onAddDay }) {
 
         <div className="space-y-2">
           <div className="text-sm text-muted-foreground">
-            Ejemplo: 1, 2, 3... (puedes crear el día que necesites)
+            Ejemplo: 1, 2, 3... (días numéricos)
           </div>
           <Input
             value={day}
@@ -306,57 +232,232 @@ function AddDayDialog({ existingDays, onAddDay }) {
             placeholder="Número de día"
             inputMode="numeric"
           />
-          {day && existingDays.includes(String(Number(day))) ? (
+          {day && existingDays.includes(String(Math.trunc(Number(day)))) ? (
             <div className="text-sm text-destructive">Ese día ya existe.</div>
           ) : null}
         </div>
 
         <DialogFooter>
-          <Button onClick={submit} disabled={!day.trim()} className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]">
+          <FxButton onClick={submit} disabled={!day.trim()} className="rounded-full">
             Crear
-          </Button>
+          </FxButton>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
 
-function ExportImport({ db, setDB }) {
+function AddWordDialog({ onAddWord, disabled }) {
+  const [en, setEn] = useState("");
+  const [es, setEs] = useState("");
+
+  const submit = async () => {
+    if (!en.trim() || !es.trim()) return;
+    await onAddWord({ en: en.trim(), es: es.trim() });
+    setEn("");
+    setEs("");
+  };
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <FxButton className="rounded-full shrink-0" disabled={disabled}>
+          <Plus className="h-4 w-4 mr-2" /> Agregar palabra
+        </FxButton>
+      </DialogTrigger>
+
+      <DialogContent className="rounded-2xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Agregar palabra</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <div className="text-sm font-medium">Inglés</div>
+            <Input value={en} onChange={(e) => setEn(e.target.value)} placeholder="Ej: curious" />
+          </div>
+          <div className="space-y-1">
+            <div className="text-sm font-medium">Español (traducción)</div>
+            <Textarea
+              value={es}
+              onChange={(e) => setEs(e.target.value)}
+              placeholder="Ej: curioso"
+            />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <FxButton
+            onClick={submit}
+            disabled={!en.trim() || !es.trim()}
+            className="rounded-full"
+          >
+            Guardar
+          </FxButton>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AddPhraseDialog({ onAddPhrase, disabled }) {
+  const [en, setEn] = useState("");
+  const [es, setEs] = useState("");
+
+  const submit = async () => {
+    if (!en.trim() || !es.trim()) return;
+    await onAddPhrase({ en: en.trim(), es: es.trim() });
+    setEn("");
+    setEs("");
+  };
+
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <FxButton variant="secondary" className="rounded-full shrink-0" disabled={disabled}>
+          <Plus className="h-4 w-4 mr-2" /> Agregar frase
+        </FxButton>
+      </DialogTrigger>
+
+      <DialogContent className="rounded-2xl max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Agregar frase</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <div className="text-sm font-medium">Inglés</div>
+            <Textarea
+              value={en}
+              onChange={(e) => setEn(e.target.value)}
+              placeholder="Escribe la frase en inglés"
+            />
+          </div>
+          <div className="space-y-1">
+            <div className="text-sm font-medium">Español (traducción)</div>
+            <Textarea
+              value={es}
+              onChange={(e) => setEs(e.target.value)}
+              placeholder="Escribe la traducción"
+            />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <FxButton
+            onClick={submit}
+            disabled={!en.trim() || !es.trim()}
+            className="rounded-full"
+          >
+            Guardar
+          </FxButton>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Export / Import (opcional pero útil)
+function ExportImportCloud({ user }) {
   const fileRef = useRef(null);
 
-  const exportJSON = () => {
-    const blob = new Blob([JSON.stringify(db, null, 2)], {
-      type: "application/json",
-    });
+  const exportAll = async () => {
+    const out = { levels: {} };
+
+    for (const level of LEVELS) {
+      out.levels[level] = { days: {} };
+
+      const daysSnap = await getDocs(query(levelDaysCol(user.uid, level), orderBy("dayNumber", "asc")));
+      for (const dayDoc of daysSnap.docs) {
+        const dayId = dayDoc.id;
+        out.levels[level].days[dayId] = { words: {} };
+
+        const wSnap = await getDocs(query(wordsCol(user.uid, level, dayId), orderBy("createdAt", "asc")));
+        for (const w of wSnap.docs) {
+          out.levels[level].days[dayId].words[w.id] = {
+            ...w.data(),
+            phrases: {},
+          };
+
+          const pSnap = await getDocs(query(phrasesCol(user.uid, level, dayId, w.id), orderBy("createdAt", "asc")));
+          for (const p of pSnap.docs) {
+            out.levels[level].days[dayId].words[w.id].phrases[p.id] = p.data();
+          }
+        }
+      }
+    }
+
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "english-study-planner.json";
+    a.download = "english-study-cloud-export.json";
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  const importJSON = async (file) => {
+  const importAll = async (file) => {
     try {
       const text = await file.text();
-      const parsed = safeParse(text, null);
-      if (!parsed || typeof parsed !== "object") throw new Error("invalid");
+      const parsed = JSON.parse(text);
 
-      for (const lvl of LEVELS) {
-        if (!parsed[lvl]?.days) throw new Error("invalid");
+      if (!parsed?.levels) throw new Error("invalid");
+
+      const batch = writeBatch(firestore);
+
+      // Importa sin borrar lo existente: crea/merge docs
+      for (const level of LEVELS) {
+        const lvl = parsed.levels?.[level];
+        if (!lvl?.days) continue;
+
+        for (const [dayId, dayObj] of Object.entries(lvl.days)) {
+          const dayN = Number(dayId);
+          batch.set(
+            dayDocRef(user.uid, level, dayId),
+            { dayNumber: Number.isFinite(dayN) ? dayN : 0, createdAt: serverTimestamp() },
+            { merge: true }
+          );
+
+          const wordsObj = dayObj?.words || {};
+          for (const [wordId, wordData] of Object.entries(wordsObj)) {
+            batch.set(
+              wordDocRef(user.uid, level, dayId, wordId),
+              {
+                en: wordData.en ?? "",
+                es: wordData.es ?? "",
+                createdAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+
+            const phrasesObj = wordData?.phrases || {};
+            for (const [phraseId, phraseData] of Object.entries(phrasesObj)) {
+              batch.set(
+                phraseDocRef(user.uid, level, dayId, wordId, phraseId),
+                {
+                  en: phraseData.en ?? "",
+                  es: phraseData.es ?? "",
+                  createdAt: serverTimestamp(),
+                },
+                { merge: true }
+              );
+            }
+          }
+        }
       }
 
-      setDB(parsed);
+      await batch.commit();
+      alert("Importación completada (se mezcló con lo existente).");
     } catch {
-      alert("Archivo inválido. Debe ser un JSON exportado desde esta app.");
+      alert("Import inválido. Debe ser un JSON exportado por esta app.");
     }
   };
 
   return (
     <div className="flex items-center gap-2">
-      <Button variant="secondary" className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]" onClick={exportJSON}>
+      <FxButton variant="secondary" className="rounded-full shrink-0" onClick={exportAll}>
         <Download className="h-4 w-4 mr-2" /> Exportar
-      </Button>
+      </FxButton>
 
       <input
         ref={fileRef}
@@ -365,18 +466,18 @@ function ExportImport({ db, setDB }) {
         className="hidden"
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) importJSON(f);
+          if (f) importAll(f);
           e.target.value = "";
         }}
       />
 
-      <Button
+      <FxButton
         variant="secondary"
-        className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]"
+        className="rounded-full shrink-0"
         onClick={() => fileRef.current?.click()}
       >
         <Upload className="h-4 w-4 mr-2" /> Importar
-      </Button>
+      </FxButton>
     </div>
   );
 }
@@ -385,12 +486,47 @@ export default function EnglishStudyPlannerApp() {
   const [user, setUser] = useState(null);
   const [loadingUser, setLoadingUser] = useState(true);
 
-  // ✅ Tus datos de estudio (esto ya NO es Firestore)
-  const [db, setDB] = useState(defaultDB());
-
-  // Navegación simple
+  // Navegación
   const [level, setLevel] = useState(null);
   const [day, setDay] = useState(null);
+
+  // Datos actuales (en pantalla)
+  const [days, setDays] = useState([]); // [{id, dayNumber}]
+  const [words, setWords] = useState([]); // [{id, en, es, showEs}]
+  const [phrasesByWord, setPhrasesByWord] = useState({}); // wordId -> [{id,en,es,showEs}]
+  const [expandedWords, setExpandedWords] = useState({}); // wordId -> bool
+  const phrasesUnsubsRef = useRef({}); // wordId -> unsub function
+
+  const [theme, setTheme] = useState("light");
+
+  const resetDayUI = () => {
+    // detener listeners de frases si existen
+    Object.values(phrasesUnsubsRef.current).forEach((fn) => {
+      try { fn?.(); } catch {}
+    });
+    phrasesUnsubsRef.current = {};
+
+    // limpiar UI
+    setWords([]);
+    setPhrasesByWord({});
+    setExpandedWords({});
+  };
+
+  useEffect(() => {
+    const t = getInitialTheme();
+    setTheme(t);
+    applyTheme(t);
+  }, []);
+
+  const toggleTheme = () => {
+    setTheme((prev) => {
+      const next = prev === "dark" ? "light" : "dark";
+      localStorage.setItem(THEME_KEY, next);
+      applyTheme(next);
+      return next;
+    });
+  };
+
 
   // Cargar voces
   useEffect(() => {
@@ -402,7 +538,7 @@ export default function EnglishStudyPlannerApp() {
     return () => synth.removeEventListener?.("voiceschanged", handler);
   }, []);
 
-  // ✅ Escuchar sesión
+  // Sesión
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
@@ -411,102 +547,206 @@ export default function EnglishStudyPlannerApp() {
     return () => unsub();
   }, []);
 
-  // ✅ Leer datos desde Firestore al iniciar sesión
-  useEffect(() => {
-    if (!user) return;
-
-    const ref = doc(firestore, "users", user.uid);
-
-    const unsub = onSnapshot(ref, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data()?.studyData;
-        setDB(data && typeof data === "object" ? data : defaultDB());
-      } else {
-        const initial = defaultDB();
-        setDoc(ref, { studyData: initial });
-        setDB(initial);
-      }
-    });
-
-    return () => unsub();
-  }, [user]);
-
-  // ✅ Guardar cambios en Firestore cuando db cambie
-  useEffect(() => {
-    if (!user) return;
-    const ref = doc(firestore, "users", user.uid);
-    setDoc(ref, { studyData: db }, { merge: true });
-  }, [db, user]);
-
   const loginWithGoogle = async () => {
     const provider = new GoogleAuthProvider();
     await signInWithPopup(auth, provider);
   };
 
   const logout = async () => {
+    // limpiar listeners
+    Object.values(phrasesUnsubsRef.current).forEach((fn) => {
+      try { fn?.(); } catch {}
+    });
+    phrasesUnsubsRef.current = {};
+    setPhrasesByWord({});
+    setExpandedWords({});
+    setWords([]);
+    setDays([]);
+    setLevel(null);
+    setDay(null);
+
     await signOut(auth);
   };
 
-  const daysForLevel = useMemo(() => {
-    if (!level) return [];
-    const daysObj = db?.[level]?.days || {};
-    return Object.keys(daysObj)
-      .sort((a, b) => Number(a) - Number(b))
-      .map((d) => ({ key: d, ...daysObj[d] }));
-  }, [db, level]);
+  // Escuchar días cuando estamos dentro de un nivel
+  useEffect(() => {
+    if (!user || !level || day) return;
 
-  const currentDay = useMemo(() => {
-    if (!level || !day) return null;
-    return db?.[level]?.days?.[day] || null;
-  }, [db, level, day]);
-
-  const goHome = () => {
-    setLevel(null);
-    setDay(null);
-  };
-  const goLevel = (lvl) => {
-    setLevel(lvl);
-    setDay(null);
-  };
-  const goDay = (d) => setDay(d);
-
-  const updateDay = (updater) => {
-    if (!level || !day) return;
-    setDB((prev) => {
-      const next = structuredClone(prev);
-      const lvl = next[level];
-      if (!lvl.days[day]) lvl.days[day] = { words: [], phrases: [] };
-      updater(lvl.days[day]);
-      return next;
-    });
-  };
-
-  const addDay = (dayKey) => {
-    if (!level) return;
-    setDB((prev) => {
-      const next = structuredClone(prev);
-      next[level].days[dayKey] = next[level].days[dayKey] || {
-        words: [],
-        phrases: [],
-      };
-      return next;
-    });
-  };
-
-  const deleteDay = (dayKey) => {
-    if (!level) return;
-    setDB((prev) => {
-      const next = structuredClone(prev);
-      delete next[level].days[dayKey];
-      if (Object.keys(next[level].days).length === 0) {
-        next[level].days["1"] = { words: [], phrases: [] };
+    const q = query(levelDaysCol(user.uid, level), orderBy("dayNumber", "asc"));
+    const unsub = onSnapshot(q, (snap) => {
+      const next = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      // Si no hay días, crea el día 1 automáticamente
+      if (next.length === 0) {
+        setDoc(dayDocRef(user.uid, level, "1"), { dayNumber: 1, createdAt: serverTimestamp() }, { merge: true });
       }
-      return next;
+      setDays(next);
     });
-    if (day === dayKey) setDay(null);
+
+    return () => unsub();
+  }, [user, level, day]);
+
+  // Escuchar palabras cuando estamos dentro de un día
+  useEffect(() => {
+    if (!user || !level || !day) return;
+
+    // ✅ LIMPIAR UI INMEDIATAMENTE al cambiar de día
+    setWords([]);
+    setPhrasesByWord({});
+    setExpandedWords({});
+
+    // ✅ limpiar listeners previos de frases
+    Object.values(phrasesUnsubsRef.current).forEach((fn) => {
+      try { fn?.(); } catch {}
+    });
+    phrasesUnsubsRef.current = {};
+
+    // ✅ asegurar doc del día
+    const dayN = Number(day);
+    setDoc(
+      dayDocRef(user.uid, level, day),
+      { dayNumber: Number.isFinite(dayN) ? dayN : 0, createdAt: serverTimestamp() },
+      { merge: true }
+    );
+
+    const q = query(wordsCol(user.uid, level, day), orderBy("createdAt", "asc"), limit(40));
+
+    // ✅ agrega callback de error para detectar permisos/reglas
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const next = snap.docs.map((d) => ({
+          id: d.id,
+          ...d.data(),
+          showEs: false,
+        }));
+        setWords(next); // si está vacío, deja []
+      },
+      (err) => {
+        console.error("Error leyendo palabras del día:", err);
+        // si falla, al menos no dejes datos viejos en pantalla
+        setWords([]);
+      }
+    );
+
+    return () => unsub();
+  }, [user, level, day]);
+
+
+  // Helpers CRUD
+  const addDay = async (dayId) => {
+    const n = Number(dayId);
+    await setDoc(
+      dayDocRef(user.uid, level, dayId),
+      { dayNumber: Number.isFinite(n) ? n : 0, createdAt: serverTimestamp() },
+      { merge: true }
+    );
   };
 
-  // 🔐 Pantalla de carga / login
+  const deleteDay = async (dayId) => {
+    // Borra el día (NO borra subcolecciones automáticamente)
+    // Para una app personal pequeña está bien; si quieres borrar completo (palabras/frases) lo hacemos luego.
+    await deleteDoc(dayDocRef(user.uid, level, dayId));
+    if (day === dayId) setDay(null);
+  };
+
+  const addWord = async ({ en, es }) => {
+    if (words.length >= 40) {
+      alert("Máximo 40 palabras por día.");
+      return;
+    }
+    await addDoc(wordsCol(user.uid, level, day), {
+      en,
+      es,
+      createdAt: serverTimestamp(),
+    });
+  };
+
+  const deleteWord = async (wordId) => {
+    // Detener listener de frases si estaba abierto
+    try {
+      phrasesUnsubsRef.current[wordId]?.();
+    } catch {}
+    delete phrasesUnsubsRef.current[wordId];
+
+    setExpandedWords((p) => {
+      const n = { ...p };
+      delete n[wordId];
+      return n;
+    });
+    setPhrasesByWord((p) => {
+      const n = { ...p };
+      delete n[wordId];
+      return n;
+    });
+
+    await deleteDoc(wordDocRef(user.uid, level, day, wordId));
+  };
+
+  const toggleWordEs = (wordId) => {
+    setWords((prev) =>
+      prev.map((w) => (w.id === wordId ? { ...w, showEs: !w.showEs } : w))
+    );
+  };
+
+  const ensurePhrasesListener = (wordId) => {
+    if (phrasesUnsubsRef.current[wordId]) return;
+
+    const q = query(
+      phrasesCol(user.uid, level, day, wordId),
+      orderBy("createdAt", "asc"),
+      limit(10)
+    );
+
+    const unsub = onSnapshot(q, (snap) => {
+      const next = snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+        showEs: false,
+      }));
+      setPhrasesByWord((prev) => ({ ...prev, [wordId]: next }));
+    });
+
+    phrasesUnsubsRef.current[wordId] = unsub;
+  };
+
+  const toggleExpand = (wordId) => {
+    setExpandedWords((prev) => {
+      const next = { ...prev, [wordId]: !prev[wordId] };
+      return next;
+    });
+
+    // Lazy-load: cuando expandes por primera vez, se suscribe
+    ensurePhrasesListener(wordId);
+  };
+
+  const addPhrase = async (wordId, { en, es }) => {
+    const current = phrasesByWord[wordId]?.length || 0;
+    if (current >= 10) {
+      alert("Máximo 10 frases por palabra.");
+      return;
+    }
+    await addDoc(phrasesCol(user.uid, level, day, wordId), {
+      en,
+      es,
+      createdAt: serverTimestamp(),
+    });
+  };
+
+  const deletePhrase = async (wordId, phraseId) => {
+    await deleteDoc(phraseDocRef(user.uid, level, day, wordId, phraseId));
+  };
+
+  const togglePhraseEs = (wordId, phraseId) => {
+    setPhrasesByWord((prev) => {
+      const list = prev[wordId] || [];
+      return {
+        ...prev,
+        [wordId]: list.map((p) => (p.id === phraseId ? { ...p, showEs: !p.showEs } : p)),
+      };
+    });
+  };
+
+  // Render login
   if (loadingUser) {
     return <div className="p-10">Cargando usuario...</div>;
   }
@@ -518,18 +758,18 @@ export default function EnglishStudyPlannerApp() {
           <CardContent className="p-6 space-y-4">
             <div className="text-xl font-semibold">Inicia sesión</div>
             <div className="text-sm text-muted-foreground">
-              Para que tus palabras y frases se guarden y puedas verlas en otro PC.
+              Para que tu contenido se guarde en la nube y lo veas en cualquier PC.
             </div>
-            <Button className="w-full rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]" onClick={loginWithGoogle}>
+            <FxButton className="w-full rounded-full" onClick={loginWithGoogle}>
               Iniciar sesión con Google
-            </Button>
+            </FxButton>
           </CardContent>
         </Card>
       </div>
     );
   }
 
-  // HOME
+  // HOME (niveles)
   if (!level) {
     return (
       <div className="min-h-screen bg-background">
@@ -541,95 +781,92 @@ export default function EnglishStudyPlannerApp() {
             </Badge>
           }
           right={
-            <div className="flex items-center gap-2">
-              <ExportImport db={db} setDB={setDB} />
-              <Button variant="secondary" className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]" onClick={logout}>
-                <LogOut className="h-4 w-4 sm:mr-2" /> Cerrar sesión
+            <>
+              <FxButton
+                variant="secondary"
+                className="rounded-full shrink-0"
+                onClick={toggleTheme}
+                title="Cambiar tema"
+              >
+                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                <span className="hidden sm:inline ml-2">
+                  {theme === "dark" ? "Claro" : "Oscuro"}
+                </span>
+              </FxButton>
+
+              <ExportImportCloud user={user} />
+              <FxButton variant="secondary" className="rounded-full shrink-0" onClick={logout}>
+                <LogOut className="h-4 w-4 sm:mr-2" />
                 <span className="hidden sm:inline">Cerrar sesión</span>
-              </Button>
-            </div>
+              </FxButton>
+            </>
           }
         />
 
         <div className="mx-auto max-w-5xl px-4 py-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {LEVELS.map((lvl) => {
-              const dayCount = Object.keys(db?.[lvl]?.days || {}).length;
-              const wordsCount = Object.values(db?.[lvl]?.days || {}).reduce(
-                (acc, d) => acc + (d.words?.length || 0),
-                0
-              );
-              const phrasesCount = Object.values(db?.[lvl]?.days || {}).reduce(
-                (acc, d) => acc + (d.phrases?.length || 0),
-                0
-              );
-
-              return (
-                <Card
-                  key={lvl}
-                  className="rounded-2xl hover:shadow-sm transition cursor-pointer"
-                  onClick={() => goLevel(lvl)}
-                >
-                  <CardContent className="p-5">
-                    <div className="flex items-center justify-between">
-                      <div className="text-xl font-semibold">{lvl}</div>
-                      <Badge className="rounded-full" variant="secondary">
-                        {dayCount} día{dayCount === 1 ? "" : "s"}
-                      </Badge>
-                    </div>
-                    <div className="mt-3 text-sm text-muted-foreground">
-                      Palabras:{" "}
-                      <span className="font-medium text-foreground">{wordsCount}</span>{" "}
-                      · Frases:{" "}
-                      <span className="font-medium text-foreground">{phrasesCount}</span>
-                    </div>
-                    <div className="mt-4 text-sm">
-                      Entra para ver tus días y estudiar con pronunciación.
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
-
-          <div className="mt-6">
-            <Card className="rounded-2xl">
-              <CardContent className="p-5">
-                <div className="text-sm text-muted-foreground">
-                  Tip: si no suena la pronunciación, sube el volumen y prueba tocando
-                  primero cualquier botón.
-                </div>
-              </CardContent>
-            </Card>
+            {LEVELS.map((lvl) => (
+              <Card
+                key={lvl}
+                className="rounded-2xl hover:shadow-sm transition-all duration-200 hover:-translate-y-[1px] active:translate-y-0 cursor-pointer"
+                onClick={() => {
+                  setLevel(lvl);
+                  setDay(null);
+                }}
+              >
+                <CardContent className="p-5">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xl font-semibold">{lvl}</div>
+                    <Badge className="rounded-full" variant="secondary">
+                      Nivel
+                    </Badge>
+                  </div>
+                  <div className="mt-4 text-sm text-muted-foreground">
+                    Entra para ver tus días. Cada día: máx 40 palabras, cada palabra: máx 10 frases.
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
           </div>
         </div>
       </div>
     );
   }
 
-  // LEVEL
+  // LEVEL (lista de días)
   if (level && !day) {
-    const existingDays = Object.keys(db?.[level]?.days || {}).sort(
-      (a, b) => Number(a) - Number(b)
-    );
+    const existingDays = days.map((d) => d.id).sort((a, b) => Number(a) - Number(b));
 
     return (
       <div className="min-h-screen bg-background">
         <TopBar
           title={`Nivel ${level}`}
           left={
-            <Button variant="ghost" className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]" onClick={goHome}>
+            <FxButton variant="ghost" className="rounded-full" onClick={() => setLevel(null)}>
               <ChevronLeft className="h-4 w-4 mr-1" /> Volver
-            </Button>
+            </FxButton>
           }
           right={
-            <div className="flex items-center gap-2">
+            <>
+              <FxButton
+                variant="secondary"
+                className="rounded-full shrink-0"
+                onClick={toggleTheme}
+                title="Cambiar tema"
+              >
+                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                <span className="hidden sm:inline ml-2">
+                  {theme === "dark" ? "Claro" : "Oscuro"}
+                </span>
+              </FxButton>
+
               <AddDayDialog existingDays={existingDays} onAddDay={addDay} />
-              <ExportImport db={db} setDB={setDB} />
-              <Button variant="secondary" className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]" onClick={logout}>
-                <LogOut className="h-4 w-4 mr-2" /> Cerrar sesión
-              </Button>
-            </div>
+              <ExportImportCloud user={user} />
+              <FxButton variant="secondary" className="rounded-full shrink-0" onClick={logout}>
+                <LogOut className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Cerrar sesión</span>
+              </FxButton>
+            </>
           }
         />
 
@@ -639,185 +876,274 @@ export default function EnglishStudyPlannerApp() {
               <CalendarDays className="h-4 w-4 mr-2" /> Días del nivel
             </Badge>
             <div className="text-sm text-muted-foreground">
-              Selecciona un día para ver Palabras y Frases.
+              Selecciona un día para ver palabras y frases.
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {daysForLevel.map((d) => {
-              const w = d.words?.length || 0;
-              const p = d.phrases?.length || 0;
-
-              return (
-                <Card
-                  key={d.key}
-                  className="rounded-2xl hover:shadow-sm transition cursor-pointer"
-                  onClick={() => goDay(d.key)}
-                >
-                  <CardContent className="p-5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="text-lg font-semibold">Día {d.key}</div>
-                        <div className="mt-2 text-sm text-muted-foreground">
-                          Palabras:{" "}
-                          <span className="font-medium text-foreground">{w}</span>{" "}
-                          · Frases:{" "}
-                          <span className="font-medium text-foreground">{p}</span>
-                        </div>
+            {days.map((d) => (
+              <Card
+                key={d.id}
+                className="rounded-2xl hover:shadow-sm transition-all duration-200 hover:-translate-y-[1px] active:translate-y-0 cursor-pointer"
+                onClick={() => setDay(d.id)}
+              >
+                <CardContent className="p-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-lg font-semibold">Día {d.id}</div>
+                      <div className="mt-2 text-sm text-muted-foreground">
+                        Máx 40 palabras · Máx 10 frases por palabra
                       </div>
-
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteDay(d.key);
-                        }}
-                        title="Eliminar día"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
                     </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
+
+                    <FxButton
+                      variant="ghost"
+                      size="icon"
+                      className="rounded-full transition-transform active:scale-95"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteDay(d.id);
+                      }}
+                      title="Eliminar día"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </FxButton>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
           </div>
 
           <Separator />
 
           <EmptyState
-            title="¿Cómo usarlo?"
-            subtitle="Entra a un día → agrega palabras o frases → practica viendo el significado y escuchando la pronunciación. (Ahora se guarda en la nube por tu usuario)."
+            title="Tip"
+            subtitle="Entra a un día → agrega palabras → abre cada palabra para agregar hasta 10 frases."
           />
         </div>
       </div>
     );
   }
 
-  // DAY
-  const words = currentDay?.words || [];
-  const phrases = currentDay?.phrases || [];
+  // DAY (palabras con frases expandibles)
+  const wordsCount = words.length;
 
   return (
     <div className="min-h-screen bg-background">
       <TopBar
         title={`Nivel ${level} · Día ${day}`}
         left={
-          <Button variant="ghost" className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]" onClick={() => setDay(null)}>
+          <FxButton
+            variant="ghost"
+            className="rounded-full"
+            onClick={() => {
+              resetDayUI();
+              setDay(null);
+            }}
+          >
             <ChevronLeft className="h-4 w-4 mr-1" /> Días
-          </Button>
+          </FxButton>
         }
+
         right={
-          <div className="flex items-center gap-2">
-            <ExportImport db={db} setDB={setDB} />
-            <Button variant="secondary" className="rounded-full shrink-0 transition-all duration-200 hover:scale-[1.02] hover:shadow-sm active:scale-[0.98]" onClick={logout}>
-              <LogOut className="h-4 w-4 mr-2" /> Cerrar sesión
-            </Button>
-          </div>
+          <>
+            <FxButton
+              variant="secondary"
+              className="rounded-full shrink-0"
+              onClick={toggleTheme}
+              title="Cambiar tema"
+            >
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              <span className="hidden sm:inline ml-2">
+                {theme === "dark" ? "Claro" : "Oscuro"}
+              </span>
+            </FxButton>
+
+            <Badge className="rounded-full shrink-0" variant="secondary">
+              {wordsCount}/40 palabras
+            </Badge>
+
+            <AddWordDialog onAddWord={addWord} disabled={wordsCount >= 40} />
+
+            <ExportImportCloud user={user} />
+
+            <FxButton variant="secondary" className="rounded-full shrink-0" onClick={logout}>
+              <LogOut className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Cerrar sesión</span>
+            </FxButton>
+          </>
         }
       />
 
       <div className="mx-auto max-w-5xl px-4 py-6 space-y-4">
-        <Tabs defaultValue="words" className="w-full">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <TabsList className="rounded-full">
-              <TabsTrigger value="words" className="rounded-full">
-                Palabras
-              </TabsTrigger>
-              <TabsTrigger value="phrases" className="rounded-full">
-                Frases
-              </TabsTrigger>
-            </TabsList>
+        {words.length === 0 ? (
+          <EmptyState
+            title="Aún no tienes palabras en este día"
+            subtitle="Agrega hasta 40 palabras, y en cada palabra agrega hasta 10 frases."
+          />
+        ) : (
+          <div className="space-y-3">
+            {words.map((w, idx) => {
+              const expanded = !!expandedWords[w.id];
+              const phrases = phrasesByWord[w.id] || [];
+              const phrasesCount = phrases.length;
 
-            <div className="flex items-center gap-2">
-              <TabsContent value="words" className="m-0">
-                <AddItemDialog
-                  type="words"
-                  onAdd={(item) =>
-                    updateDay((d) => {
-                      d.words = [item, ...(d.words || [])];
-                    })
-                  }
-                />
-              </TabsContent>
+              return (
+                <Card key={w.id} className="rounded-2xl">
+                  <CardContent className="p-4 sm:p-5 space-y-3">
+                    {/* Header palabra */}
+                    <div className="flex items-start gap-3">
+                      <div className="flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-base sm:text-lg font-semibold leading-snug">
+                            {idx + 1}. {w.en}
+                          </div>
 
-              <TabsContent value="phrases" className="m-0">
-                <AddItemDialog
-                  type="phrases"
-                  onAdd={(item) =>
-                    updateDay((d) => {
-                      d.phrases = [item, ...(d.phrases || [])];
-                    })
-                  }
-                />
-              </TabsContent>
-            </div>
+                          <FxButton
+                            variant="ghost"
+                            size="icon"
+                            className="rounded-full transition-transform active:scale-95"
+                            onClick={() => speakEnglish(w.en)}
+                            title="Escuchar pronunciación"
+                          >
+                            <Volume2 className="h-4 w-4" />
+                          </FxButton>
+
+                          <FxButton
+                            variant="ghost"
+                            size="icon"
+                            className="rounded-full transition-transform active:scale-95"
+                            onClick={() => toggleWordEs(w.id)}
+                            title={w.showEs ? "Ocultar traducción" : "Ver traducción"}
+                          >
+                            {w.showEs ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          </FxButton>
+
+                          <Badge className="rounded-full" variant="secondary">
+                            {phrasesCount}/10 frases
+                          </Badge>
+                        </div>
+
+                        {w.showEs ? (
+                          <div className="mt-2 text-sm text-muted-foreground">{w.es}</div>
+                        ) : (
+                          <div className="mt-2 text-sm text-muted-foreground italic">
+                            (toca el ojo para ver la traducción)
+                          </div>
+                        )}
+                      </div>
+
+                      <FxButton
+                        variant="ghost"
+                        size="icon"
+                        className="rounded-full transition-transform active:scale-95"
+                        onClick={() => deleteWord(w.id)}
+                        title="Eliminar palabra"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </FxButton>
+                    </div>
+
+                    {/* Acciones palabra */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <FxButton
+                        variant="secondary"
+                        className="rounded-full shrink-0"
+                        onClick={() => toggleExpand(w.id)}
+                      >
+                        {expanded ? (
+                          <>
+                            <ChevronUp className="h-4 w-4 mr-2" /> Cerrar frases
+                          </>
+                        ) : (
+                          <>
+                            <ChevronDown className="h-4 w-4 mr-2" /> Ver frases
+                          </>
+                        )}
+                      </FxButton>
+
+                      <AddPhraseDialog
+                        disabled={phrasesCount >= 10}
+                        onAddPhrase={(data) => addPhrase(w.id, data)}
+                      />
+                    </div>
+
+                    {/* Frases expandibles */}
+                    {expanded ? (
+                      <div className="pt-2 space-y-2">
+                        {phrasesCount === 0 ? (
+                          <div className="text-sm text-muted-foreground italic">
+                            Aún no hay frases para esta palabra.
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {phrases.map((p, i) => (
+                              <Card key={p.id} className="rounded-2xl">
+                                <CardContent className="p-3">
+                                  <div className="flex items-start gap-3">
+                                    <div className="flex-1">
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <div className="font-medium">
+                                          {i + 1}. {p.en}
+                                        </div>
+
+                                        <FxButton
+                                          variant="ghost"
+                                          size="icon"
+                                          className="rounded-full transition-transform active:scale-95"
+                                          onClick={() => speakEnglish(p.en)}
+                                          title="Escuchar pronunciación"
+                                        >
+                                          <Volume2 className="h-4 w-4" />
+                                        </FxButton>
+
+                                        <FxButton
+                                          variant="ghost"
+                                          size="icon"
+                                          className="rounded-full transition-transform active:scale-95"
+                                          onClick={() => togglePhraseEs(w.id, p.id)}
+                                          title={p.showEs ? "Ocultar traducción" : "Ver traducción"}
+                                        >
+                                          {p.showEs ? (
+                                            <EyeOff className="h-4 w-4" />
+                                          ) : (
+                                            <Eye className="h-4 w-4" />
+                                          )}
+                                        </FxButton>
+                                      </div>
+
+                                      {p.showEs ? (
+                                        <div className="mt-1 text-sm text-muted-foreground">{p.es}</div>
+                                      ) : (
+                                        <div className="mt-1 text-sm text-muted-foreground italic">
+                                          (toca el ojo para ver la traducción)
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    <FxButton
+                                      variant="ghost"
+                                      size="icon"
+                                      className="rounded-full transition-transform active:scale-95"
+                                      onClick={() => deletePhrase(w.id, p.id)}
+                                      title="Eliminar frase"
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                    </FxButton>
+                                  </div>
+                                </CardContent>
+                              </Card>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
-
-          <TabsContent value="words" className="mt-4">
-            {words.length === 0 ? (
-              <EmptyState
-                title="Aún no tienes palabras en este día"
-                subtitle="Agrega palabras en inglés con su significado en español."
-              />
-            ) : (
-              <div className="grid grid-cols-1 gap-3">
-                {words.map((it) => (
-                  <ItemCard
-                    key={it.id}
-                    item={it}
-                    onSpeak={() => speakEnglish(it.en)}
-                    onToggle={() =>
-                      updateDay((d) => {
-                        d.words = (d.words || []).map((x) =>
-                          x.id === it.id ? { ...x, showEs: !x.showEs } : x
-                        );
-                      })
-                    }
-                    onDelete={() =>
-                      updateDay((d) => {
-                        d.words = (d.words || []).filter((x) => x.id !== it.id);
-                      })
-                    }
-                  />
-                ))}
-              </div>
-            )}
-          </TabsContent>
-
-          <TabsContent value="phrases" className="mt-4">
-            {phrases.length === 0 ? (
-              <EmptyState
-                title="Aún no tienes frases en este día"
-                subtitle="Agrega frases completas para practicar pronunciación y significado."
-              />
-            ) : (
-              <div className="grid grid-cols-1 gap-3">
-                {phrases.map((it) => (
-                  <ItemCard
-                    key={it.id}
-                    item={it}
-                    onSpeak={() => speakEnglish(it.en)}
-                    onToggle={() =>
-                      updateDay((d) => {
-                        d.phrases = (d.phrases || []).map((x) =>
-                          x.id === it.id ? { ...x, showEs: !x.showEs } : x
-                        );
-                      })
-                    }
-                    onDelete={() =>
-                      updateDay((d) => {
-                        d.phrases = (d.phrases || []).filter((x) => x.id !== it.id);
-                      })
-                    }
-                  />
-                ))}
-              </div>
-            )}
-          </TabsContent>
-        </Tabs>
+        )}
 
         <Separator />
 
@@ -825,9 +1151,9 @@ export default function EnglishStudyPlannerApp() {
           <CardContent className="p-5 space-y-2">
             <div className="text-sm font-medium">Sugerencias rápidas</div>
             <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1">
-              <li>Usa frases cortas para A1–A2 y más largas para B2–C1.</li>
-              <li>Primero intenta recordar el significado, luego abre el ojo para verificar.</li>
-              <li>Si la voz suena en español, prueba usar un navegador con voces en inglés instaladas.</li>
+              <li>Elige 10–20 palabras al día para que sea sostenible.</li>
+              <li>En cada palabra escribe 3–10 frases con contextos distintos.</li>
+              <li>Primero intenta recordar la traducción, luego la revelas.</li>
             </ul>
           </CardContent>
         </Card>
